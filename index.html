@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Zomboid Error Finder</title>
+<style>
+h2 {
+  font-size: 1.25em;
+  margin: 0 0 0.25em 0;
+}
+h3 {
+  margin: 0.25em 0;
+}
+section {
+  border: 2px solid black;
+  border-radius: 5px;
+  padding: 0.5em;
+  width: 300px;
+  margin-left: auto;
+  margin-right: auto;
+}
+div {
+  border: 2px solid black;
+  border-radius: 5px;
+  padding: 0.5em;
+  width: fit-content;
+}
+#output {
+  margin-left: auto;
+  margin-right: auto;
+  width: fit-content;
+}
+.hidden {
+  display: none;
+}
+#input {
+  border: 1px dashed black;
+  margin-top: 0.25em;
+  padding: 5px;
+}
+p {
+  margin: 0.25em 0;
+}
+textarea {
+  resize: none;
+}
+progress {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 25vh;
+  width: 250px;
+}
+#controls {
+  background-color: aliceblue;
+  padding: 5px;
+  position: fixed;
+  right: 10px;
+  top: 10px;
+  width: fit-content;
+}
+</style>
+</head>
+<body>
+  <section>
+    <h2>Process Console Log</h2>
+    <input id="input" type="file" />
+    <h3>Instructions</h3>
+    <p>Either drag-and-drop the text file into the dotted area above, or click the "Choose File" button and select the text file from the file browser.</p>
+  </section>
+  <progress id="progressbar" class="hidden"></progress>
+  <div id="output" class="hidden">
+    <textarea id="specs"></textarea>
+  </div>
+  <div id="controls" class="hidden">
+    <button id="export">Export to File</button>
+  </div>
+<script type="text/javascript">
+const input = document.getElementById('input'),
+      progressbar = document.getElementById('progressbar'),
+      output = document.getElementById('output'),
+      section = document.querySelector('section'),
+      system_specs = document.getElementById('specs'),
+      export_btn = document.getElementById('export');
+
+// Creates a file save prompt for a given input
+const saveAs = (data, filename = "untitled") => {
+  switch (typeof data) {
+    case "undefined":
+      throw Error("No data or variable is not yet initialized");
+    // Symbols are for in-program use and not meant to be viewed/saved to disk
+    case "symbol":
+      throw Error("Symbols cannot be resolved to a serializable form");
+    case "string":
+    case "number":
+    case "bigint":
+    case "boolean":
+    case "function":
+      // Text and numbers are stored as UTF-8 formatted plaintext
+      data = new Blob([data], {type: "text/plain;charset=utf-8"});
+      break;
+    case "object":
+      // Weak implementations are meant for in-program use, just like Symbols
+      if (data instanceof WeakMap || data instanceof WeakSet)
+        throw Error("WeakSet and WeakMap cannot be enumerated, thus cannot be traversed and saved");
+      // Arrays and Sets are stored simply as a comma-delimited list of values
+      if (Array.isArray(data)) data = new Blob([data], {type: "text/plain;charset=utf-8"});
+      if (data instanceof Set) data = new Blob([[...data]], {type: "text/plain;charset=utf-8"});
+      // Maps are converted into key-value pairs, object values are turned into JSON strings, then the
+      // keypairs are bundled into a multi-line string separated by Windows style newlines
+      if (data instanceof Map) {
+        data = [...data].map(x => {
+          let [key, value] = [...x];
+          switch (typeof value) {
+            case "object":
+              return `${key} = ${JSON.stringify(value)}`;
+            default:
+              return `${key} = ${value}`;
+          }
+        }).join("\r\n");
+        data = new Blob([data], {type: "text/plain;charset=utf-8"});
+      }
+      // Objects without an arrayBuffer property (which would be a Blob) can be turned into a JSON string and saved as such
+      if (!data.arrayBuffer) data = new Blob([JSON.stringify(data)], {type: "application/json"});
+      break;
+    default:
+      throw Error("Data type not supported");
+  }
+  // Turn our Blob into a data uri
+  const url = window.URL.createObjectURL(data);
+  const a = document.createElement('a');
+  // Set the <a> tag attributes to allow a file download
+  a.download = filename;
+  // Add the data uri
+  a.href = url;
+  a.style.display = "none";
+  // Then append the hidden <a> tag to the body and click it to open a save dialog box
+  document.body.appendChild(a);
+  a.click();
+  // Finally, clean up!
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+};
+
+// Extract the log type and data if available
+const formatLine = line => {
+  if (line[5] === ":" && line[19] === ",") {
+    line = line.match(/^(?<type>.*: [A-Za-z]*) *, \d{13}> (?<data>.*)/).groups;
+  } else {
+    line = {
+      "type": null,
+      "data": line
+    };
+  }
+  return line;
+};
+
+input.addEventListener('change', e => {
+  e.stopPropagation();
+  e.preventDefault();
+
+  let [file] = e.target.files;
+  input.value = "";
+  progressbar.classList.toggle('hidden');
+  section.classList.toggle('hidden');
+
+  let fileReader = new FileReader();
+  fileReader.addEventListener('load', e => {
+    let lines = fileReader.result, line, found = false, error;
+    const errors = [], specs = [];
+
+    // Split text into lines; default order is: \r\n, \r, then \n
+    if (lines.indexOf("\r\n")) {
+      lines = lines.split("\r\n");
+    } else {
+      lines = lines.indexOf("\r") ? lines.split("\r") : lines.split("\n");
+    }
+    // Remove blank lines
+    lines = lines.filter(l => l.length > 0);
+    const len = lines.length;
+
+    for (let i = 0; i < len; i++) {
+      line = formatLine(lines[i]);
+
+      // Gather system specs
+      if (specs.length > 70) {
+        // All specs gathered, scan logs
+        if (line.type === "ERROR: General" && line.data.indexOf("Stack trace:") > 0) {
+          // Go backwards to the start of the error, but don't back up into a previous trace
+          while (line.type === "ERROR: General" && !line.data.startsWith("\tat")) line = formatLine(lines[--i]);
+          line = formatLine(lines[++i]);
+          error = "";
+          // Gather lines before the trace
+          while (!line.data.startsWith("\tat")) {
+            error += `${line.data}\n`;
+            line = formatLine(lines[++i]);
+          }
+          // Gather the trace
+          while (line.data.startsWith("\tat")) {
+            error += `${line.data.replace("\t", "    ")}\n`;
+            line = formatLine(lines[++i]);
+          }
+          // Check if we've stopped mid-trace due a "caused by" line, or if the trace is over
+          if (line.data.startsWith("Caused by:")) {
+            error += `${line.data}\n`;
+            line = formatLine(lines[++i]);
+            // Finish gathering trace
+            while (line.data.startsWith("\tat")) {
+              error += `${line.data.replace("\t", "    ")}\n`;
+              line = formatLine(lines[++i]);
+            }
+          } else {
+            // Check if it has the additional file trace at the end and include it
+            if (lines[i].indexOf("STACK TRACE") > 0) {
+              error += lines[i].substring(36);
+            }
+          }
+          // Add error to list if not already there
+          for (let err of errors) {
+            if (err === error) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) errors.push(error);
+        }
+      } else if (specs.length > 60) {
+        if (lines[i].indexOf("GraphicsCard:") > 0) {
+          line.data = lines[i].substring(lines[i].indexOf("GraphicsCard"));
+          while (!line.data.startsWith("AngelCodeFont")) {
+            specs.push(line.data);
+            line = formatLine(lines[++i]);
+          }
+          specs.push(`PZ Install Location: ${line.data.split("texture ")[1].split("media/")[0]}`);
+          line = formatLine(lines[++i]);
+        }
+        if (line.data.startsWith("versionNumber=")) {
+          specs.push(`PZ Version: ${line.data.split("=")[1]}`);
+          line = formatLine(lines[++i]);
+        }
+      } else if (specs.length > 10) {
+        // Gather additional specs
+        if (line.data === "-- listing properties --") {
+          line = formatLine(lines[++i]);
+          while (line.data !== "-----") {
+            specs.push(line.data);
+            line = formatLine(lines[++i]);
+          }
+        }
+      } else if (specs.length === 0) {
+        if (line.data === "===== System specs =====") {
+          line = formatLine(lines[++i]);
+          while (line.data !== "========================") {
+            specs.push(line.data);
+            line = formatLine(lines[++i]);
+          }
+        }
+      }
+    }
+
+    system_specs.textContent = specs.join("\n");
+    system_specs.cols = specs.reduce((a,b) => a.length > b.length ? a : b).length;
+    system_specs.rows = specs.length;
+
+    let div, textEle, split,
+        exp = `${system_specs.textContent}\n\n${errors.join("")}`;
+
+    for (let error of errors) {
+      div = document.createElement("div");
+
+      textEle = document.createElement("textarea");
+      textEle.textContent = error.substring(0, error.lastIndexOf("\n"));
+
+      split = textEle.textContent.split("\n");
+      textEle.cols = split.reduce((a,b) => a.length > b.length ? a : b).length;
+      textEle.rows = split.length;
+      div.appendChild(textEle);
+
+      output.appendChild(div);
+      if (errors.length > 1 && errors.indexOf(error) < errors.length - 1) {
+        output.appendChild(document.createElement("hr"));
+      }
+    }
+
+    export_btn.addEventListener('click', ()=>{
+      saveAs(exp, "PZErrors.txt");
+    });
+
+    progressbar.classList.toggle('hidden');
+    output.classList.toggle('hidden');
+    controls.classList.toggle('hidden');
+  }, {'once': true});
+  fileReader.readAsText(file);
+});
+</script>
+</body>
+</html>
