@@ -197,7 +197,7 @@ input.addEventListener('change', e => {
             line = formatLine(lines[++i]);
           }
           // Gather the trace
-          while (line.data.startsWith("\tat")) {
+          while (line.data.startsWith("\tat") || line.data.startsWith("\t...")) {
             error += `${line.data.replace("\t", "    ")}\n`;
             line = formatLine(lines[++i]);
           }
@@ -206,9 +206,12 @@ input.addEventListener('change', e => {
             error += `${line.data}\n`;
             line = formatLine(lines[++i]);
             // Finish gathering trace
-            while (line.data.startsWith("\tat")) {
+            while (line.data.startsWith("\tat") || line.data.startsWith("\t...")) {
               error += `${line.data.replace("\t", "    ")}\n`;
               line = formatLine(lines[++i]);
+            }
+            if (lines[i].indexOf("STACK TRACE") > 0) {
+              error += lines[i].substring(36);
             }
           } else {
             // Check if it has the additional file trace at the end and include it
@@ -264,7 +267,7 @@ input.addEventListener('change', e => {
     system_specs.rows = specs.length;
 
     let div, textEle, split,
-        exp = `${system_specs.textContent}\n\n${errors.join("")}`;
+        exp = `${system_specs.textContent}\n\n${errors.join("\n")}`;
 
     for (let error of errors) {
       div = document.createElement("div");
